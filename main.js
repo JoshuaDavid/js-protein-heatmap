@@ -1,3 +1,4 @@
+/*
 var H = 500, W = 500;
 var canvas = document.createElement('canvas');
 canvas.height = H;
@@ -16,9 +17,19 @@ for(var i = 0; i < 630; i++) {
         //console.log(te - ts);
     }, 100 * i);
 }
+//*/
 
 function getAtoms(raw_text) {
     var atom_lines = raw_text.match(/ATOM\s+\S+.*?\n/g);
+    // Radii of common atoms, in angstroms
+    var radii = {
+        'H' : 0.25,
+        'C' : 0.70,
+        'N' : 0.65,
+        'O' : 0.60,
+        'P' : 1.00,
+        'S' : 1.00
+    }
     var i = 0;
     var atoms = atom_lines.map(function(line) {
         var atom = new (function Atom(){
@@ -42,12 +53,14 @@ function getAtoms(raw_text) {
         atom.element     = line.slice(77, 79).trim();
         atom.charge      = line.slice(79    ).trim();
         atom.line = line;
+        atom.radius 
         return atom;
     });
     return atoms;
 }
 
 function P3(x, y, z) {
+    if(this === window) return new P3(x, y, z);
     this.x = x;
     this.y = y;
     this.z = z;
@@ -55,17 +68,20 @@ function P3(x, y, z) {
 }
 
 function square(x) { return x * x }
-// Takes a sphere (p3, r) and a volume (p3 0, which is x/y/z min, and p3 1,
-// which is x/y/z max, and returns whether or not they intersect.
-function sphereTouchesVolume(s, r, v0, v1) {
-    var d2 = square(s.r)
-    if     (s.x < c.x      ) d2 -= square(s.x - c.x      );
-    else if(s.x < c.x + c.s) d2 -= square(s.x - c.x + c.s);
-    if     (s.y < c.y      ) d2 -= square(s.y - c.y      );
-    else if(s.y < c.y + c.s) d2 -= square(s.y - c.y + c.s);
-    if     (s.z < c.z      ) d2 -= square(s.z - c.z      );
-    else if(s.z < c.z + c.s) d2 -= square(s.z - c.z + c.s);
-    return d2 >= 0;
+/**
+ *  Take a point, and a volume defined by min x, y, z and max x, y, z and return
+ *  the distance between that point and the closest vertex, edge, or surface of
+ *  that volume squared (squared for performance reasons, as sqrt is expensive)
+ */
+function pointVolumeDistance2(p, v0, v1) {
+    var d2 = 0;
+    if     (p.x < v0.x) d2 += square(v0.x - p.x);
+    else if(p.x > v1.x) d2 += square(v1.x - p.x);
+    if     (p.x < v0.x) d2 += square(v0.x - p.x);
+    else if(p.x > v1.x) d2 += square(v1.x - p.x);
+    if     (p.x < v0.x) d2 += square(v0.x - p.x);
+    else if(p.x > v1.x) d2 += square(v1.x - p.x);
+    return d2;
 }
 
 
@@ -136,6 +152,7 @@ Molecule.prototype.getCenter = function() {
     center.z /= i;
     return center;
 }
+// Absolute minimal drawing method -- each atom is a black pixel. Very fast (~30ms)
 Molecule.prototype.drawPoints = function(context) {
     var H = context.canvas.height;
     var W = context.canvas.width;
@@ -143,12 +160,9 @@ Molecule.prototype.drawPoints = function(context) {
     context.fillStyle = "white";
     context.fillRect(0, 0, W, H);
     var imgData = context.getImageData(0, 0, W, H);
-    var bmx = bounds.min.x, bmy = bounds.min.y;
-    var sx = bounds.max.x - bounds.min.x;
-    var sy = bounds.max.y - bounds.min.y;
-    var sz = bounds.max.z - bounds.min.z;
+    var s = new P3(bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z);
     var center = this.getCenter();
-    var scale = Math.min(W, H) / Math.sqrt(sx*sx + sy*sy + sz*sz);
+    var scale = Math.min(W, H) / Math.sqrt(s.x*s.x + s.y*s.y + s.z*s.z);
     function p3ToPixel(p3) {
         return {
             x: 0 | W / 2 + scale * (p3.x - center.x),
@@ -166,4 +180,41 @@ Molecule.prototype.drawPoints = function(context) {
     }
     context.putImageData(imgData, 0, 0);
 }
-
+Molecule.prototype.getBoundary = function(probeSize) {
+    var bounds = this.getBounds();
+    var ts = new Date().getTime();
+    var atoms = this.atoms;
+    /**
+     * Create three 3d grids of voxels. The first will say what the closest atom
+     * to that voxel is. The second will say what the distance from that atom
+     * to that voxel is. If the distance is 0, that means that the atom is inside
+     * of the voxel. The third grid says which atoms are inside of that voxel.
+     */
+    // Yes, I do deserve to be shot for the function name. I don't know what to call it
+    // yet, though, because at this point I'm not entirely sure I know what it will be doing.
+    function subdivide(atoms, bounds) {
+        var s = new P3(bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z);
+        var closestAtoms = [];
+        var distances2   = [];
+        var atomsInside  = [];
+        for(var i = 0; i < this.atoms.length; i++) {
+            var atom = this.atoms[i];
+            var k = 2;
+            for(var iz = 0; iz < k; iz++) {
+                var z = bounds.min.z + iz * s.z;
+                for(var iy = 0; iy < k; iy++) {
+                    var y = bounds.min.y + iy * s.y;
+                    for(var ix = 0; ix < k; ix++) {
+                        var x = bounds.min.x + ix * s.x / k;
+                        var d2 = square(z - atom.z) + square(y - atom.y) + square(x - atom.x);
+                        if(distances2[iz][iy][ix] > d2) {
+                            distances2[iz][iy][ix] = d2;
+                            closestAtoms[iz][iy][ix] = i;
+                        }
+                    }
+                }
+            }
+        }
+        return distances2;
+    }
+}
